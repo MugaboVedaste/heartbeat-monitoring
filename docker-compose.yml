@@ -39,7 +39,7 @@ services:
     image: postgres:16
     container_name: postgres
     ports:
-      - "5432:5432"   # change to "5433:5432" if you already have PostgreSQL installed on Windows
+      - "5433:5432"   # change to "5433:5432" if you already have PostgreSQL installed on Windows
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
