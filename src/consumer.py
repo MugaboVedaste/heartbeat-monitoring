@@ -6,6 +6,8 @@ How it stays reliable:
   - Kafka offsets are committed only AFTER the batch is saved in PostgreSQL,
     so if the consumer crashes, unsaved readings are read again on restart (nothing is lost)
   - invalid messages are logged and skipped, so one bad message can't stop the pipeline
+  - if PostgreSQL is down, the consumer waits and retries (1s, 2s, 4s ... up to 30s)
+    instead of crashing; while it waits, it pauses reading from Kafka
 
 Run from the project root (venv active, Kafka and PostgreSQL running):
     python -m src.consumer
@@ -14,9 +16,10 @@ Stop with Ctrl+C.
 
 import logging
 import time
+from typing import Callable
 
 import psycopg2
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, TopicPartition
 from psycopg2.extras import execute_values
 
 from src import config
@@ -28,10 +31,85 @@ GROUP_ID = "heartbeat-db-writer"
 BATCH_SIZE = 50                # save after this many valid readings...
 FLUSH_INTERVAL_SECONDS = 2.0   # ...or after this long, whichever comes first
 
+MAX_BACKOFF_SECONDS = 30       # longest wait between database retries
+SHUTDOWN_SAVE_ATTEMPTS = 3     # when stopping, don't retry forever
+
+# Errors that mean "the database can't be reached right now" -> worth retrying.
+# Other errors (e.g. a bug in our SQL) would fail every time, so they are not retried.
+RETRYABLE_DB_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
 INSERT_SQL = """
     INSERT INTO heartbeats (customer_id, recorded_at, heart_rate, status)
     VALUES %s
 """
+
+
+class Database:
+    """Holds the PostgreSQL connection and reconnects when it has been lost."""
+
+    def __init__(self):
+        self.conn = None
+
+    def ensure_connected(self) -> None:
+        if self.conn is None or self.conn.closed:
+            self.conn = psycopg2.connect(
+                host=config.POSTGRES_HOST,
+                port=config.POSTGRES_PORT,
+                dbname=config.POSTGRES_DB,
+                user=config.POSTGRES_USER,
+                password=config.POSTGRES_PASSWORD,
+                connect_timeout=5,
+            )
+
+    def save(self, rows: list[dict]) -> None:
+        """Insert all rows in one transaction: either all are saved or none are."""
+        values = [(r["customer_id"], r["recorded_at"], r["heart_rate"], r["status"]) for r in rows]
+        with self.conn:  # commits on success, rolls back on error
+            with self.conn.cursor() as cur:
+                execute_values(cur, INSERT_SQL, values)
+
+    def close(self) -> None:
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except psycopg2.Error:
+                pass
+        self.conn = None
+
+
+def backoff_delay(attempt: int) -> int:
+    """Seconds to wait before retry number `attempt`: 1, 2, 4, 8, 16, 30, 30, ..."""
+    return min(2 ** (attempt - 1), MAX_BACKOFF_SECONDS)
+
+
+def save_with_retry(db, rows: list[dict], wait: Callable[[float], None],
+                    max_attempts: int | None = None) -> None:
+    """
+    Save rows, retrying with exponential backoff while the database is unavailable.
+
+    `wait` is the function used to pause between retries. The consumer passes one that keeps
+    the Kafka connection alive; tests pass a fake one so they don't really wait.
+    `max_attempts=None` means keep trying until it works.
+    """
+    if not rows:
+        return
+    attempt = 0
+    while True:
+        try:
+            db.ensure_connected()
+            db.save(rows)
+            if attempt:
+                logger.info("Database is back: saved the batch after %d failed attempt(s)", attempt)
+            return
+        except RETRYABLE_DB_ERRORS as exc:
+            attempt += 1
+            db.close()  # the old connection may be broken; reconnect on the next try
+            if max_attempts is not None and attempt >= max_attempts:
+                raise
+            delay = backoff_delay(attempt)
+            reason = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+            logger.warning("Database unavailable (%s). Retry %d in %ds...", reason, attempt, delay)
+            wait(delay)
 
 
 def create_consumer() -> Consumer:
@@ -45,29 +123,33 @@ def create_consumer() -> Consumer:
     return consumer
 
 
-def connect_db():
-    return psycopg2.connect(
-        host=config.POSTGRES_HOST,
-        port=config.POSTGRES_PORT,
-        dbname=config.POSTGRES_DB,
-        user=config.POSTGRES_USER,
-        password=config.POSTGRES_PASSWORD,
-    )
+def make_paused_wait(consumer: Consumer) -> Callable[[float], None]:
+    """
+    Return a wait function that pauses Kafka reading but keeps polling.
 
-
-def save_batch(conn, rows: list[dict]) -> None:
-    """Insert all rows in one transaction: either all are saved or none are."""
-    if not rows:
-        return
-    values = [(r["customer_id"], r["recorded_at"], r["heart_rate"], r["status"]) for r in rows]
-    with conn:  # commits on success, rolls back on error
-        with conn.cursor() as cur:
-            execute_values(cur, INSERT_SQL, values)
+    Why not just time.sleep()? Kafka expects a consumer to poll regularly; one that goes
+    silent for too long is considered dead and removed from its group. Pausing means
+    poll() keeps us "alive" without handing us new messages.
+    """
+    def wait(seconds: float) -> None:
+        partitions = consumer.assignment()
+        consumer.pause(partitions)
+        try:
+            deadline = time.monotonic() + seconds
+            while (remaining := deadline - time.monotonic()) > 0:
+                msg = consumer.poll(min(remaining, 1.0))
+                if msg is not None and not msg.error():
+                    # Shouldn't happen while paused, but if it does, rewind so it isn't skipped
+                    consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
+        finally:
+            consumer.resume(partitions)
+    return wait
 
 
 def run() -> None:
     consumer = create_consumer()
-    conn = connect_db()
+    db = Database()
+    wait = make_paused_wait(consumer)
     logger.info("Listening on topic '%s' as group '%s'", config.KAFKA_TOPIC, GROUP_ID)
 
     batch: list[dict] = []
@@ -75,11 +157,11 @@ def run() -> None:
     last_flush = time.monotonic()
     stats = {"saved": 0, "invalid": 0, "low": 0, "high": 0}
 
-    def flush() -> None:
+    def flush(max_attempts: int | None = None) -> None:
         nonlocal has_uncommitted, last_flush
         if has_uncommitted:
-            save_batch(conn, batch)                   # 1. save to PostgreSQL
-            consumer.commit(asynchronous=False)       # 2. then tell Kafka "done up to here"
+            save_with_retry(db, batch, wait, max_attempts)  # 1. save to PostgreSQL (retries if down)
+            consumer.commit(asynchronous=False)             # 2. then tell Kafka "done up to here"
             stats["saved"] += len(batch)
             if batch:
                 logger.info("Saved %d readings (total saved=%d, invalid=%d, low=%d, high=%d)",
@@ -119,10 +201,14 @@ def run() -> None:
         logger.info("Stopping...")
     finally:
         try:
-            flush()  # save whatever is left before exiting
+            flush(max_attempts=SHUTDOWN_SAVE_ATTEMPTS)  # save what's left, but don't hang forever
+        except Exception as exc:
+            # Offsets were NOT committed, so these readings will be read again on the next start
+            logger.error("Could not save the last %d readings (%s). They will be re-read on restart.",
+                         len(batch), exc)
         finally:
             consumer.close()
-            conn.close()
+            db.close()
             logger.info("Consumer stopped. Saved=%d, invalid=%d", stats["saved"], stats["invalid"])
 
 
