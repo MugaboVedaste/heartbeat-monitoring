@@ -1,0 +1,11 @@
+# Tells Grafana to load every dashboard JSON file from /etc/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: heartbeat-dashboards
+    folder: Heartbeat Monitoring
+    type: file
+    disableDeletion: true
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards

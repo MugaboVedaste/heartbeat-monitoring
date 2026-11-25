@@ -39,7 +39,7 @@ services:
     image: postgres:16
     container_name: postgres
     ports:
-      - "5433:5432"   # change to "5433:5432" if you already have PostgreSQL installed on Windows
+      - "5433:5432"   # host port 5433 avoids clashing with a local PostgreSQL on 5432
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -53,5 +53,27 @@ services:
       timeout: 5s
       retries: 5
 
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    ports:
+      - "3000:3000"   # open http://localhost:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/heartbeat-monitoring.json
+      # Passed in so the datasource file can use them (see grafana/provisioning/datasources)
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - grafana_data:/var/lib/grafana                          # keeps Grafana settings between restarts
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro    # datasource + dashboard loading
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro        # the dashboard itself
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  grafana_data:
