@@ -307,11 +307,26 @@ Kafka has no Docker volume in this setup, so its data is removed with the contai
 
 ## Screenshots
 
-_Add screenshots to a `docs/screenshots/` folder and link them here, for example:_
+### Containers running
+![Containers healthy](docs/screenshots/01-containers-healthy.png)
 
-- `docker compose ps` showing both containers healthy
-- Topic description (3 partitions)
-- Producer and consumer terminals running
-- SQL query results (row count, status breakdown)
-- `pytest -v -s` output with all tests passing
-- Consumer logs during the recovery test (retries, then "Database is back")
+### Kafka topic with 3 partitions
+![Topic description](docs/screenshots/02-topic-describe.png)
+
+### Producer sending readings
+![Producer](docs/screenshots/03-producer-running.png)
+
+### Consumer validating and saving readings
+![Consumer](docs/screenshots/04-consumer-running.png)
+
+### Readings saved in PostgreSQL
+![Database rows](docs/screenshots/05-database-rows.png)
+
+### Anomaly breakdown
+![Status breakdown](docs/screenshots/06-status-breakdown.png)
+
+### All tests passing
+![Tests](docs/screenshots/07-tests-passing.png)
+
+### Recovering from a database outage
+![Recovery retries](docs/screenshots/08-recovery-retries.png)
