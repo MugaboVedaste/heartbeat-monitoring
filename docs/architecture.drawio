@@ -1,0 +1,102 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="heartbeat-architecture" name="Architecture">
+    <mxGraphModel dx="1400" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="680" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="Real-Time Customer Heart Beat Monitoring – Data Flow" style="text;html=1;fontSize=20;fontStyle=1;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="700" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Zones -->
+        <mxCell id="zoneHost" value="Host machine – Python scripts (venv)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontColor=#555555;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="20" y="60" width="1360" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="zoneDocker" value="Docker Compose" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eef5fb;strokeColor=#6c8ebf;dashed=1;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontColor=#3b5b8a;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="20" y="320" width="1360" height="300" as="geometry"/>
+        </mxCell>
+
+        <!-- Host components -->
+        <mxCell id="gen" value="&lt;b&gt;Data generator&lt;/b&gt;&lt;br&gt;data_generator.py&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;10 customers, 1 reading/s each&lt;br&gt;~3% spikes / drops&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="50" y="110" width="170" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="prod" value="&lt;b&gt;Kafka producer&lt;/b&gt;&lt;br&gt;producer.py&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;acks=all, idempotent&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="290" y="110" width="170" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cons" value="&lt;b&gt;Kafka consumer&lt;/b&gt;&lt;br&gt;consumer.py&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;group: heartbeat-db-writer&lt;br&gt;batches of 50 / every 2s&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="110" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="val" value="&lt;b&gt;Validation&lt;/b&gt;&lt;br&gt;validation.py" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="950" y="100" width="150" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="skip" value="&lt;b&gt;Logged &amp;amp; skipped&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;not JSON, missing fields,&lt;br&gt;impossible heart rate&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="115" width="180" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Kafka broker with topic and partitions -->
+        <mxCell id="kafka" value="&lt;b&gt;Kafka broker&lt;/b&gt; (apache/kafka 4.0, KRaft)&lt;br&gt;localhost:9092" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;spacingTop=6;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="300" y="370" width="390" height="210" as="geometry"/>
+        </mxCell>
+        <mxCell id="topic" value="Topic: &lt;b&gt;heartbeats&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;spacingTop=4;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="320" y="420" width="350" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="p0" value="Partition 0" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="335" y="460" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="p1" value="Partition 1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="445" y="460" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="p2" value="Partition 2" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="555" y="460" width="100" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="pnote" value="same customer_id → same partition → kept in order" style="text;html=1;fontSize=10;align=center;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="335" y="510" width="320" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- PostgreSQL -->
+        <mxCell id="pg" value="&lt;b&gt;PostgreSQL 16&lt;/b&gt;&lt;br&gt;heartbeats table&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;localhost:5433&lt;br&gt;indexed on recorded_at&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="940" y="400" width="170" height="140" as="geometry"/>
+        </mxCell>
+
+        <!-- Optional dashboard -->
+        <mxCell id="graf" value="&lt;b&gt;Dashboard&lt;/b&gt;&lt;br&gt;Grafana (optional)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;dashed=1;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="430" width="160" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" value="readings" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;fontSize=10;" edge="1" parent="1" source="gen" target="prod">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" value="JSON&lt;br&gt;key = customer_id" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="prod" target="kafka">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="375" y="300"/><mxPoint x="400" y="300"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="poll" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="kafka" target="cons">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="590" y="290"/><mxPoint x="760" y="290"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="commit offset&lt;br&gt;(only after save)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;dashed=1;fontSize=10;labelBackgroundColor=#ffffff;fontColor=#555555;" edge="1" parent="1" source="cons" target="kafka">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="840" y="420"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="cons" target="val">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" value="invalid" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;strokeColor=#b85450;fontSize=10;fontColor=#b85450;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="val" target="skip">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" value="valid → low / normal / high&lt;br&gt;batch INSERT&lt;br&gt;retry 1s, 2s, 4s … 30s if DB down" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;strokeColor=#82b366;fontSize=10;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="val" target="pg">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" value="SQL queries" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;dashed=1;strokeColor=#999999;fontSize=10;fontColor=#666666;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="pg" target="graf">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

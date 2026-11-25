@@ -17,6 +17,7 @@ flowchart LR
     V -->|"valid: labelled low / normal / high"| DB[("PostgreSQL<br/>heartbeats table")]
     V -->|"invalid"| L["Logged and skipped"]
 ```
+📐 **Detailed data flow diagram:** [view image](docs/architecture.png) · [editable draw.io source](docs/architecture.drawio)
 
 | Component | What it does |
 |---|---|
