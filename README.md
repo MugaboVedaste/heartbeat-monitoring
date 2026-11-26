@@ -16,7 +16,10 @@ flowchart LR
     C --> V{"Validation<br/>(validation.py)"}
     V -->|"valid: labelled low / normal / high"| DB[("PostgreSQL<br/>heartbeats table")]
     V -->|"invalid"| L["Logged and skipped"]
+    DB --> GF["Grafana dashboard<br/>localhost:3000"]
+    K -.-> UI["Kafbat UI<br/>localhost:8080"]
 ```
+
 📐 **Detailed data flow diagram:** [view image](docs/architecture.png) · [editable draw.io source](docs/architecture.drawio)
 
 | Component | What it does |
@@ -26,6 +29,8 @@ flowchart LR
 | **Kafka** | Stores the stream of readings durably. Producer and consumer never talk directly, so either can stop without data loss. |
 | **Kafka consumer** | Reads readings, validates them, saves valid ones to PostgreSQL in batches, then commits its Kafka offset. |
 | **PostgreSQL** | Long-term storage, indexed for time-range, per-customer and anomaly queries. |
+| **Grafana** | Live dashboard on top of PostgreSQL: heart rate per customer, anomaly counts, latest anomalies. |
+| **Kafbat UI** | Web interface for Kafka: browse topics, partitions, raw messages and consumer group lag. |
 
 Each reading looks like this:
 
@@ -40,6 +45,8 @@ Each reading looks like this:
 - **Python 3.10+** with `confluent-kafka`, `psycopg2-binary`, `python-dotenv`, `pytest`
 - **Apache Kafka 4.0** in KRaft mode (no Zookeeper), via Docker
 - **PostgreSQL 16**, via Docker
+- **Grafana 11** for the live dashboard, via Docker
+- **Kafbat UI** to browse Kafka topics, messages and consumer groups, via Docker
 - **Docker Compose** to run the infrastructure
 
 ---
@@ -48,12 +55,24 @@ Each reading looks like this:
 
 ```
 heartbeat-monitoring/
-├── docker-compose.yml      # Kafka + PostgreSQL
+├── docker-compose.yml      # Kafka + Kafbat UI + PostgreSQL + Grafana
 ├── .env.example            # settings template (copy to .env)
 ├── requirements.txt
 ├── pytest.ini
 ├── sql/
 │   └── schema.sql          # table + indexes, applied automatically on first start
+├── grafana/
+│   ├── provisioning/
+│   │   ├── datasources/
+│   │   │   └── postgres.yml    # auto-connects Grafana to PostgreSQL
+│   │   └── dashboards/
+│   │       └── dashboards.yml  # tells Grafana where to load dashboards from
+│   └── dashboards/
+│       └── heartbeat-monitoring.json   # the dashboard
+├── docs/
+│   ├── architecture.drawio # editable data flow diagram (open in draw.io)
+│   ├── architecture.png    # exported data flow diagram
+│   └── screenshots/        # images of the running system, used below
 ├── src/
 │   ├── config.py           # loads settings from .env
 │   ├── data_generator.py   # synthetic heart rate readings
@@ -93,16 +112,20 @@ cd heartbeat-monitoring
 cp .env.example .env
 ```
 
-Open `.env` and set `POSTGRES_PASSWORD`. Avoid the `$` character, or wrap the value in single quotes.
+Open `.env` and set the passwords:
 
-### 3. Start Kafka and PostgreSQL
+- `POSTGRES_PASSWORD`: the main database password. Avoid the `$` character, or wrap the value in single quotes.
+- `GRAFANA_DB_PASSWORD`: password for Grafana's read-only database user (step 5). **Use letters and numbers only**; Grafana treats `$` as a variable.
+- `GRAFANA_ADMIN_PASSWORD`: your Grafana login.
+
+### 3. Start the services
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-Wait until both containers show **healthy** (about 30 seconds). On first start, PostgreSQL automatically creates the `heartbeats` table from `sql/schema.sql`.
+Wait until `kafka` and `postgres` show **healthy** and `grafana` and `kafka-ui` are **running** (about 30 seconds). On first start, PostgreSQL automatically creates the `heartbeats` table from `sql/schema.sql`.
 
 ### 4. Create the Kafka topic
 
@@ -120,7 +143,29 @@ Check it:
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic heartbeats
 ```
 
-### 5. Set up Python
+### 5. Create Grafana's read-only database user
+
+Grafana only needs to read data, so it gets its own user with `SELECT` access instead of the owner account:
+
+```bash
+docker exec -it postgres psql -U postgres -d heartbeat_db
+```
+
+```sql
+CREATE USER grafana_reader WITH PASSWORD 'your_grafana_db_password';  -- same as GRAFANA_DB_PASSWORD in .env
+GRANT CONNECT ON DATABASE heartbeat_db TO grafana_reader;
+GRANT USAGE ON SCHEMA public TO grafana_reader;
+GRANT SELECT ON heartbeats TO grafana_reader;
+\q
+```
+
+Then restart Grafana so it connects with the new user:
+
+```bash
+docker compose up -d --force-recreate grafana
+```
+
+### 6. Set up Python
 
 ```bash
 python -m venv venv
@@ -154,6 +199,36 @@ The producer logs progress every 50 readings and every anomaly it generates. The
 Always use `python -m src.<name>` (not `python src/<name>.py`) so the `src` imports resolve.
 
 To preview generated data without Kafka: `python -m src.data_generator`
+
+---
+
+## Live dashboard (Grafana)
+
+Open **http://localhost:3000** and log in with `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` from your `.env` (default `admin` / `admin`).
+
+The **Customer Heart Beat Monitoring** dashboard opens automatically and refreshes every 5 seconds while the producer and consumer run. It shows:
+
+- **Readings, Normal, Low, High** counts for the selected time range
+- **Average pipeline delay** from sensor reading to database
+- **Heart rate per customer** over time, with low (<50) and high (>120) zones shaded
+- **Average heart rate per customer** over the last minute
+- **Latest anomalies** table
+
+Grafana connects to PostgreSQL automatically using the files in `grafana/provisioning/`, logging in as the read-only `grafana_reader` user from setup step 5. Inside Docker it reaches the database at `postgres:5432` (container name and internal port), not `localhost:5433`.
+
+The dashboard shows the last 15 minutes by default. When the pipeline is stopped, choose a wider range (top right, e.g. *Last 24 hours*) to see saved history.
+
+---
+
+## Browsing Kafka (Kafbat UI)
+
+Open **http://localhost:8080** to see inside Kafka without command-line tools:
+
+- **Brokers:** the single broker and its status
+- **Topics → heartbeats:** the 3 partitions, message counts, and the **Messages** tab showing each reading with its partition, offset and key (`customer_id`)
+- **Consumers → heartbeat-db-writer:** the consumer group's committed offsets and **lag** per partition
+
+Kafbat UI runs inside Docker, so it connects to Kafka at `kafka:29092` (the listener for other containers), not `localhost:9092`.
 
 ---
 
@@ -270,6 +345,13 @@ All settings are read from `.env` by `src/config.py`.
 | `NUM_CUSTOMERS` | `10` | Simulated customers |
 | `SEND_INTERVAL_SECONDS` | `1.0` | Seconds between rounds of readings |
 | `ANOMALY_PROBABILITY` | `0.03` | Chance that a reading is a spike or drop |
+| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | Grafana login |
+| `GRAFANA_DB_USER` / `GRAFANA_DB_PASSWORD` | `grafana_reader` / — | Read-only database login used by Grafana (no `$` in the password) |
+
+| Web interface | URL |
+|---|---|
+| Grafana dashboard | http://localhost:3000 |
+| Kafbat UI (Kafka) | http://localhost:8080 |
 
 ---
 
@@ -291,6 +373,15 @@ Same reason: the schema runs only on first start. Reset with `docker compose dow
 **`ModuleNotFoundError: No module named ...`**
 The venv isn't active. Run `source venv/Scripts/activate` and check for `(venv)` in the prompt.
 
+**Grafana: `password authentication failed`, but the password is correct**
+Grafana treats `$` in provisioned values as the start of a variable, so a password like `Abc$123` is sent as `Abc`. Use a password without `$` for `GRAFANA_DB_PASSWORD`, then `docker compose up -d --force-recreate grafana`.
+
+**Grafana: `dial tcp [::1]:5433: connection refused`**
+A datasource is pointing at `localhost:5433`. Inside Docker, `localhost` is the Grafana container itself; the database is at `postgres:5432`. Use the provisioned *Heartbeat PostgreSQL* datasource and delete any hand-made one.
+
+**Grafana panels show "No data"**
+Check that the producer and consumer are running and that the time range (top right) covers recent readings, e.g. *Last 15 minutes*. If the panels show a datasource error instead, check `docker compose logs grafana`; the PostgreSQL values in `.env` must be set before Grafana starts (restart it with `docker compose restart grafana` after changing them).
+
 **Topic is gone after `docker compose down`**
 Kafka has no Docker volume in this setup, so its data is removed with the container. Recreate the topic (setup step 4).
 
@@ -302,7 +393,7 @@ Kafka has no Docker volume in this setup, so its data is removed with the contai
 - **Dead-letter topic:** invalid messages are only logged; sending them to a separate Kafka topic would let them be inspected or replayed.
 - **Single broker:** fine for development. Production would use 3+ brokers with replication factor 3.
 - **Kafka data is not persisted** across `docker compose down`.
-- **Dashboard:** Grafana connected to PostgreSQL for live per-customer charts and anomaly panels.
+- **Grafana's database user is created by hand** (setup step 5). An init script could create it automatically on first start.
 
 ---
 
@@ -331,3 +422,9 @@ Kafka has no Docker volume in this setup, so its data is removed with the contai
 
 ### Recovering from a database outage
 ![Recovery retries](docs/screenshots/08-recovery-retries.png)
+
+### Live Grafana dashboard
+![Grafana dashboard](docs/screenshots/09-grafana-dashboard.png)
+
+### Kafka messages in Kafbat UI
+![Kafbat UI messages](docs/screenshots/10-kafbat-messages.png)
