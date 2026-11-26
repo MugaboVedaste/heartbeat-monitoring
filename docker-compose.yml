@@ -34,6 +34,7 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+    restart: unless-stopped   # Docker restarts it automatically if it crashes
 
   postgres:
     image: postgres:16
@@ -47,12 +48,32 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data          # keeps your data when the container restarts
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro   # runs once, on first start
+      - ./sql/002_alerts.sql:/docker-entrypoint-initdb.d/02_alerts.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
-
+    restart: unless-stopped   # Docker restarts it automatically if it crashes
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"   # open http://localhost:8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: heartbeat-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092   # Kafka's door for OTHER CONTAINERS (not localhost:9092)
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped   # Docker restarts it automatically if it crashes
+  mailpit:
+    image: axllent/mailpit:v1.20.0
+    container_name: mailpit
+    ports:
+      - "1025:1025"   # SMTP: the alert service sends emails here
+      - "8025:8025"   # web inbox: open http://localhost:8025 to read them
+    restart: unless-stopped   # Docker restarts it automatically if it crashes
   grafana:
     image: grafana/grafana:11.4.0
     container_name: grafana
@@ -62,9 +83,9 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/heartbeat-monitoring.json
-      # Passed in so the datasource file can use them (see grafana/provisioning/datasources)
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Read-only database login for the dashboard (see grafana/provisioning/datasources)
+      GRAFANA_DB_USER: ${GRAFANA_DB_USER}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - grafana_data:/var/lib/grafana                          # keeps Grafana settings between restarts
@@ -73,6 +94,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped   # Docker restarts it automatically if it crashes
 
 volumes:
   pgdata:

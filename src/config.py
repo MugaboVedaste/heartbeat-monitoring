@@ -34,3 +34,25 @@ VALID_MIN_BPM = 20
 VALID_MAX_BPM = 250
 LOW_BPM_THRESHOLD = 50
 HIGH_BPM_THRESHOLD = 120
+
+
+# --- Alerting (used by alert_service.py) ---
+ALERT_CONSECUTIVE_READINGS = int(os.getenv("ALERT_CONSECUTIVE_READINGS", "3"))
+ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "300"))
+ALERT_RECOVERY_READINGS = int(os.getenv("ALERT_RECOVERY_READINGS", "3"))
+
+# --- Email (defaults point at Mailpit, the test mail server in docker-compose) ---
+SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "false").lower() == "true"
+ALERT_EMAIL_FROM = os.getenv("ALERT_EMAIL_FROM", "alerts@heartbeat.local")
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "doctor@heartbeat.local")
+
+# --- Pipeline health monitor (used by health_monitor.py) ---
+HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "30"))
+HEALTH_MAX_DATA_AGE_SECONDS = int(os.getenv("HEALTH_MAX_DATA_AGE_SECONDS", "120"))
+HEALTH_MAX_CONSUMER_LAG = int(os.getenv("HEALTH_MAX_CONSUMER_LAG", "500"))
+HEALTH_FAILURES_BEFORE_ALERT = int(os.getenv("HEALTH_FAILURES_BEFORE_ALERT", "2"))
+HEALTH_WATCH_ALERT_SERVICE = os.getenv("HEALTH_WATCH_ALERT_SERVICE", "true").lower() == "true"

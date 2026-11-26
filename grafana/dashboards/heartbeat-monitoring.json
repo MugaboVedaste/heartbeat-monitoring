@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "5s",
@@ -537,6 +537,83 @@
                         "color": "red",
                         "text": "HIGH",
                         "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Alerts",
+      "description": "Raised by alert_service.py: sustained abnormal readings and recoveries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "heartbeat-postgres"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "heartbeat-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT triggered_at AS \"Time\", customer_id AS \"Customer\", alert_type AS \"Alert\",\n       array_to_string(heart_rates, ', ') AS \"Readings (bpm)\",\n       CASE WHEN email_sent THEN 'sent' ELSE 'FAILED' END AS \"Email\"\nFROM alerts\nWHERE $__timeFilter(triggered_at)\nORDER BY triggered_at DESC\nLIMIT 50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Alert"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "high": {
+                        "color": "red",
+                        "text": "HIGH",
+                        "index": 0
+                      },
+                      "low": {
+                        "color": "blue",
+                        "text": "LOW",
+                        "index": 1
+                      },
+                      "recovered": {
+                        "color": "green",
+                        "text": "RECOVERED",
+                        "index": 2
                       }
                     }
                   }

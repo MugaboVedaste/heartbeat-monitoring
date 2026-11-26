@@ -7,9 +7,9 @@ datasources:
     uid: heartbeat-postgres
     type: grafana-postgresql-datasource
     url: postgres:5432          # container name + port INSIDE Docker (not localhost:5433)
-    user: ${POSTGRES_USER}
+    user: ${GRAFANA_DB_USER}
     secureJsonData:
-      password: ${POSTGRES_PASSWORD}
+      password: ${GRAFANA_DB_PASSWORD}
     jsonData:
       database: ${POSTGRES_DB}
       sslmode: disable
