@@ -2,7 +2,7 @@
 
 A data pipeline that simulates heart rate monitors for multiple customers, streams the readings through **Apache Kafka**, validates them in real time, and stores them in **PostgreSQL** for querying and analysis.
 
-Abnormal readings (too low or too high) are detected and labelled as they arrive, and the pipeline keeps working through bad messages and database outages without losing data.
+Abnormal readings (too low or too high) are detected and labelled as they arrive, sustained problems trigger **email alerts**, a health monitor emails when the pipeline itself breaks, and the pipeline keeps working through bad messages and database outages without losing data.
 
 ---
 
@@ -18,6 +18,9 @@ flowchart LR
     V -->|"invalid"| L["Logged and skipped"]
     DB --> GF["Grafana dashboard<br/>localhost:3000"]
     K -.-> UI["Kafbat UI<br/>localhost:8080"]
+    K --> A["Alert service<br/>(alert_service.py)"]
+    A -->|"3 abnormal in a row"| M["Email<br/>(Mailpit: localhost:8025)"]
+    A --> DB
 ```
 
 📐 **Detailed data flow diagram:** [view image](docs/architecture.png) · [editable draw.io source](docs/architecture.drawio)
@@ -29,6 +32,9 @@ flowchart LR
 | **Kafka** | Stores the stream of readings durably. Producer and consumer never talk directly, so either can stop without data loss. |
 | **Kafka consumer** | Reads readings, validates them, saves valid ones to PostgreSQL in batches, then commits its Kafka offset. |
 | **PostgreSQL** | Long-term storage, indexed for time-range, per-customer and anomaly queries. |
+| **Alert service** | A second consumer group (`heartbeat-alerts`) reading the same topic. Emails when a customer has 3 abnormal readings in a row, and again when they recover. |
+| **Health monitor** | Checks every 30 s that Kafka and PostgreSQL are reachable, new data is arriving, and both consumer groups are running and keeping up. Emails when a problem starts and when it's resolved. |
+| **Mailpit** | Test mail server that catches alert emails and shows them in a web inbox. |
 | **Grafana** | Live dashboard on top of PostgreSQL: heart rate per customer, anomaly counts, latest anomalies. |
 | **Kafbat UI** | Web interface for Kafka: browse topics, partitions, raw messages and consumer group lag. |
 
@@ -46,6 +52,7 @@ Each reading looks like this:
 - **Apache Kafka 4.0** in KRaft mode (no Zookeeper), via Docker
 - **PostgreSQL 16**, via Docker
 - **Grafana 11** for the live dashboard, via Docker
+- **Mailpit** to catch and view alert emails, via Docker
 - **Kafbat UI** to browse Kafka topics, messages and consumer groups, via Docker
 - **Docker Compose** to run the infrastructure
 
@@ -60,7 +67,8 @@ heartbeat-monitoring/
 ├── requirements.txt
 ├── pytest.ini
 ├── sql/
-│   └── schema.sql          # table + indexes, applied automatically on first start
+│   ├── schema.sql          # heartbeats table + indexes, applied automatically on first start
+│   └── 002_alerts.sql      # alerts table
 ├── grafana/
 │   ├── provisioning/
 │   │   ├── datasources/
@@ -78,13 +86,22 @@ heartbeat-monitoring/
 │   ├── data_generator.py   # synthetic heart rate readings
 │   ├── producer.py         # sends readings to Kafka
 │   ├── validation.py       # validation rules and low/normal/high labelling
-│   └── consumer.py         # reads from Kafka, validates, writes to PostgreSQL
+│   ├── consumer.py         # reads from Kafka, validates, writes to PostgreSQL
+│   ├── alerting.py         # alert rules, email messages, sending to Mailpit and/or real email
+│   ├── send_test_email.py  # checks your email settings
+│   ├── alert_service.py    # second consumer group: detects bad conditions, sends emails
+│   ├── simulate_condition.py   # test script: sends a high/low/normal episode for one customer
+│   ├── health.py           # pipeline health checks and notification rules
+│   └── health_monitor.py   # checks the pipeline every 30s, emails on failures
 └── tests/
     ├── conftest.py               # shared fixtures for end-to-end tests
     ├── helpers.py                # shared test helpers
     ├── test_validation.py        # unit tests: validation rules
     ├── test_data_generator.py    # unit tests: generated data
     ├── test_consumer_retry.py    # unit tests: database retry logic
+    ├── test_alerting.py          # unit tests: alert rules and emails
+    ├── test_health.py            # unit tests: pipeline health notifications
+    ├── test_email_delivery.py    # unit tests: sending to Mailpit and real email
     ├── test_pipeline_e2e.py      # end-to-end: Kafka -> PostgreSQL
     └── test_recovery_e2e.py      # end-to-end: survives a database outage
 ```
@@ -156,6 +173,7 @@ CREATE USER grafana_reader WITH PASSWORD 'your_grafana_db_password';  -- same as
 GRANT CONNECT ON DATABASE heartbeat_db TO grafana_reader;
 GRANT USAGE ON SCHEMA public TO grafana_reader;
 GRANT SELECT ON heartbeats TO grafana_reader;
+GRANT SELECT ON alerts TO grafana_reader;
 \q
 ```
 
@@ -202,6 +220,99 @@ To preview generated data without Kafka: `python -m src.data_generator`
 
 ---
 
+## Alerts
+
+`alert_service.py` watches the stream as its **own consumer group** (`heartbeat-alerts`), so it receives every reading independently of the database consumer.
+
+**Rules** (configurable in `.env`):
+
+- Alert when a customer has **3 abnormal readings in a row** (all high or all low). A single odd reading is ignored, since real sensors glitch; this avoids alert fatigue.
+- Don't repeat the alert for the same customer and condition for **5 minutes** (cooldown).
+- Send a **recovered** alert after **3 normal readings in a row**.
+
+Each alert is **emailed** and saved to the `alerts` table (shown in Grafana's *Alerts* panel).
+
+### Run it
+
+In a third terminal (venv active):
+
+```bash
+python -m src.alert_service
+```
+
+### Trigger an alert on demand
+
+Normal generated data almost never has 3 anomalies in a row, so use the simulator. In another terminal:
+
+```bash
+python -m src.simulate_condition --condition high --then-recover
+```
+
+This sends 5 high readings for `CUST-999` (a customer the producer never uses), then normal readings. Open **http://localhost:8025** (Mailpit) to see a **HIGH** alert email followed by a **RECOVERED** email. Other options: `--condition low`, `--count 8`, `--customer CUST-123`.
+
+### Sending real email (as well as Mailpit)
+
+Every alert goes to **Mailpit**, and also to a **real inbox** if you configure one. Both receive the same emails; if one fails, the other still gets it.
+
+**Gmail setup:**
+
+1. Turn on **2-Step Verification** for your Google account.
+2. Create an **App Password**: Google Account → Security → 2-Step Verification → *App passwords*. Name it e.g. "Heartbeat Monitoring" and copy the 16-character password.
+3. Add to `.env`:
+
+```
+REAL_SMTP_HOST=smtp.gmail.com
+REAL_SMTP_PORT=587
+REAL_SMTP_USE_TLS=true
+REAL_SMTP_USER=you@gmail.com
+REAL_SMTP_PASSWORD=abcdefghijklmnop
+REAL_ALERT_EMAIL_TO=you@gmail.com
+```
+
+`REAL_ALERT_EMAIL_TO` can list several addresses separated by commas. The sender defaults to `REAL_SMTP_USER`.
+
+4. Check the settings work:
+
+```bash
+python -m src.send_test_email
+```
+
+It sends one test email through each configured server and prints `SENT` or `FAILED` for each.
+
+5. Restart the alert service and health monitor so they load the new settings.
+
+Use your normal password? No: Gmail rejects it for apps. Use the App Password. Work or school Google accounts may have App Passwords disabled by the administrator; use a personal Gmail account in that case.
+
+---
+
+## Pipeline health monitoring
+
+Customer alerts only work if the pipeline is running. `health_monitor.py` watches the pipeline itself and emails when it breaks, so failures don't go unnoticed.
+
+| Check | Fails when | Usually means |
+|---|---|---|
+| Kafka broker | Broker unreachable or topic missing | Kafka container down |
+| PostgreSQL | Can't connect | Database container down |
+| New data arriving | No reading saved for 2 minutes | Producer, Kafka or consumer stopped |
+| Database consumer | No active consumers in `heartbeat-db-writer`, or lag > 500 | Consumer crashed or too slow |
+| Alert service | No active consumers in `heartbeat-alerts`, or lag > 500 | Alert service crashed |
+
+A check must fail **twice in a row** before emailing (so a brief blip doesn't cause an alarm). Each problem is emailed **once** when it starts, and again as **RESOLVED** when it's fixed. Emails go to the same address as customer alerts (Mailpit by default).
+
+```bash
+python -m src.health_monitor
+```
+
+Each check cycle is logged, e.g. `Kafka broker: OK | Database consumer: OK | Alert service: OK | PostgreSQL: OK | New data arriving: OK`.
+
+**Try it:** with everything running, stop the database consumer (`Ctrl+C`). Within about a minute you'll get a **PIPELINE PROBLEM: Database consumer** email in Mailpit, and after 2 minutes a second one for **New data arriving**. Restart the consumer and **PIPELINE RESOLVED** emails follow.
+
+If you don't run the alert service, set `HEALTH_WATCH_ALERT_SERVICE=false` so its absence isn't reported.
+
+All Docker services also use `restart: unless-stopped`, so Docker restarts a crashed container automatically.
+
+---
+
 ## Live dashboard (Grafana)
 
 Open **http://localhost:3000** and log in with `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` from your `.env` (default `admin` / `admin`).
@@ -213,6 +324,7 @@ The **Customer Heart Beat Monitoring** dashboard opens automatically and refresh
 - **Heart rate per customer** over time, with low (<50) and high (>120) zones shaded
 - **Average heart rate per customer** over the last minute
 - **Latest anomalies** table
+- **Alerts** table: alerts raised by the alert service, colour-coded HIGH / LOW / RECOVERED
 
 Grafana connects to PostgreSQL automatically using the files in `grafana/provisioning/`, logging in as the read-only `grafana_reader` user from setup step 5. Inside Docker it reaches the database at `postgres:5432` (container name and internal port), not `localhost:5433`.
 
@@ -321,14 +433,14 @@ Thresholds live in `src/config.py`. Anomalies are stored (not discarded), since 
 
 | Command | What runs | Needs |
 |---|---|---|
-| `pytest -m "not integration and not recovery" -v` | Unit tests (validation, generator, retry logic) | Nothing |
+| `pytest -m "not integration and not recovery" -v` | Unit tests (validation, generator, retry logic, alert rules, health rules, email delivery) | Nothing |
 | `pytest -m integration -v` | End-to-end: readings flow from Kafka to PostgreSQL with correct status; invalid messages skipped; 200-reading burst fully saved | Docker + consumer running |
 | `pytest -m recovery -v -s` | Stops PostgreSQL, sends readings, restarts it, checks none were lost | Docker + consumer running |
 | `pytest -v -s` | Everything | Docker + consumer running |
 
 End-to-end tests use unique customer ids like `TEST-3fa9c1d2` and delete their rows afterwards, so they don't affect real data. They are skipped automatically if Kafka or PostgreSQL isn't running.
 
-Current result: **57 tests passing.**
+Current result: **82 tests passing.**
 
 ---
 
@@ -346,11 +458,26 @@ All settings are read from `.env` by `src/config.py`.
 | `SEND_INTERVAL_SECONDS` | `1.0` | Seconds between rounds of readings |
 | `ANOMALY_PROBABILITY` | `0.03` | Chance that a reading is a spike or drop |
 | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | Grafana login |
+| `ALERT_CONSECUTIVE_READINGS` | `3` | Abnormal readings in a row before alerting |
+| `ALERT_COOLDOWN_SECONDS` | `300` | Wait before repeating an alert for the same customer |
+| `ALERT_RECOVERY_READINGS` | `3` | Normal readings in a row before a recovered alert |
+| `SMTP_HOST` / `SMTP_PORT` | `localhost` / `1025` | Mail server (Mailpit by default) |
+| `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_USE_TLS` | — / — / `false` | Mailpit needs no login |
+| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | `alerts@heartbeat.local` / `doctor@heartbeat.local` | Sender and recipient in Mailpit |
+| `REAL_SMTP_HOST` / `REAL_SMTP_PORT` / `REAL_SMTP_USE_TLS` | — / `587` / `true` | Real mail server (e.g. `smtp.gmail.com`); empty = off |
+| `REAL_SMTP_USER` / `REAL_SMTP_PASSWORD` | — | Real email login (Gmail: App Password) |
+| `REAL_ALERT_EMAIL_FROM` / `REAL_ALERT_EMAIL_TO` | login address / — | Real sender and recipients (comma-separated) |
+| `HEALTH_CHECK_INTERVAL_SECONDS` | `30` | How often the health monitor checks |
+| `HEALTH_MAX_DATA_AGE_SECONDS` | `120` | Report "no new data" after this long |
+| `HEALTH_MAX_CONSUMER_LAG` | `500` | Report a consumer group as falling behind above this lag |
+| `HEALTH_FAILURES_BEFORE_ALERT` | `2` | Failed checks in a row before emailing |
+| `HEALTH_WATCH_ALERT_SERVICE` | `true` | Whether to check the alert service |
 | `GRAFANA_DB_USER` / `GRAFANA_DB_PASSWORD` | `grafana_reader` / — | Read-only database login used by Grafana (no `$` in the password) |
 
 | Web interface | URL |
 |---|---|
 | Grafana dashboard | http://localhost:3000 |
+| Mailpit (alert emails) | http://localhost:8025 |
 | Kafbat UI (Kafka) | http://localhost:8080 |
 
 ---
@@ -382,6 +509,19 @@ A datasource is pointing at `localhost:5433`. Inside Docker, `localhost` is the 
 **Grafana panels show "No data"**
 Check that the producer and consumer are running and that the time range (top right) covers recent readings, e.g. *Last 15 minutes*. If the panels show a datasource error instead, check `docker compose logs grafana`; the PostgreSQL values in `.env` must be set before Grafana starts (restart it with `docker compose restart grafana` after changing them).
 
+**`relation "alerts" does not exist`**
+The database was created before the alerts table existed. Create it once with:
+`docker exec -i postgres psql -U postgres -d heartbeat_db < sql/002_alerts.sql`
+
+**No alert emails**
+Check the alert service is running and that it was started *before* the simulated readings were sent (it only watches new readings). Its log shows the SMTP address it uses; with defaults, emails appear at http://localhost:8025.
+
+**Real email: `Username and Password not accepted` (Gmail error 535)**
+Gmail needs an **App Password**, not your normal password, and 2-Step Verification must be on. Run `python -m src.send_test_email` after fixing `.env`.
+
+**Real email works but goes to spam**
+Mark the first alert as "Not spam"; Gmail learns from that.
+
 **Topic is gone after `docker compose down`**
 Kafka has no Docker volume in this setup, so its data is removed with the container. Recreate the topic (setup step 4).
 
@@ -392,6 +532,9 @@ Kafka has no Docker volume in this setup, so its data is removed with the contai
 - **At-least-once delivery:** if the consumer crashes after saving a batch but before committing the offset, those readings are saved twice on restart. A unique constraint on `(customer_id, recorded_at)` with `ON CONFLICT DO NOTHING` would make writes idempotent.
 - **Dead-letter topic:** invalid messages are only logged; sending them to a separate Kafka topic would let them be inspected or replayed.
 - **Single broker:** fine for development. Production would use 3+ brokers with replication factor 3.
+- **Who watches the watchdog?** If the health monitor itself stops, nobody is told. Production systems use an external service (e.g. a "dead man's switch" that alerts when a heartbeat ping stops arriving).
+- **Python services aren't containerised:** Docker restarts crashed containers, but the producer, consumer, alert service and health monitor must be restarted by hand. Running them in Docker too would give them the same automatic restarts.
+- **Alert state lives in memory:** if the alert service restarts, it forgets ongoing streaks and cooldowns.
 - **Kafka data is not persisted** across `docker compose down`.
 - **Grafana's database user is created by hand** (setup step 5). An init script could create it automatically on first start.
 
@@ -425,6 +568,12 @@ Kafka has no Docker volume in this setup, so its data is removed with the contai
 
 ### Live Grafana dashboard
 ![Grafana dashboard](docs/screenshots/09-grafana-dashboard.png)
+
+### Alert email in Mailpit
+![Alert email](docs/screenshots/11-alert-email.png)
+
+### Pipeline problem email
+![Pipeline problem](docs/screenshots/12-pipeline-problem-email.png)
 
 ### Kafka messages in Kafbat UI
 ![Kafbat UI messages](docs/screenshots/10-kafbat-messages.png)

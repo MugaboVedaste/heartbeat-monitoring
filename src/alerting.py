@@ -135,19 +135,82 @@ def build_email(alert: Alert) -> EmailMessage:
     return msg
 
 
-def send_message(msg: EmailMessage) -> bool:
-    """Send any email using the SMTP settings. Returns True if sent, False if it failed (logged)."""
+@dataclass(frozen=True)
+class MailServer:
+    """One place to deliver emails to (Mailpit, Gmail, ...)."""
+    name: str
+    host: str
+    port: int
+    use_tls: bool
+    user: str
+    password: str
+    sender: str
+    recipients: list[str]
+
+
+def _split_addresses(value: str) -> list[str]:
+    """'a@x.com, b@y.com' -> ['a@x.com', 'b@y.com']"""
+    return [a.strip() for a in value.split(",") if a.strip()]
+
+
+def configured_mail_servers() -> list[MailServer]:
+    """
+    Every mail server that has settings in .env:
+      - "mailpit": the local test inbox (SMTP_* settings)
+      - "real":    a real email account such as Gmail (REAL_SMTP_* settings), only if REAL_SMTP_HOST is set
+    """
+    servers = []
+    if config.SMTP_HOST:
+        servers.append(MailServer(
+            name="mailpit", host=config.SMTP_HOST, port=config.SMTP_PORT,
+            use_tls=config.SMTP_USE_TLS, user=config.SMTP_USER, password=config.SMTP_PASSWORD,
+            sender=config.ALERT_EMAIL_FROM, recipients=_split_addresses(config.ALERT_EMAIL_TO),
+        ))
+    if config.REAL_SMTP_HOST:
+        servers.append(MailServer(
+            name="real", host=config.REAL_SMTP_HOST, port=config.REAL_SMTP_PORT,
+            use_tls=config.REAL_SMTP_USE_TLS, user=config.REAL_SMTP_USER,
+            password=config.REAL_SMTP_PASSWORD,
+            # Gmail and most providers only allow sending "from" your own address
+            sender=config.REAL_ALERT_EMAIL_FROM or config.REAL_SMTP_USER,
+            recipients=_split_addresses(config.REAL_ALERT_EMAIL_TO),
+        ))
+    return servers
+
+
+def _send_via(server: MailServer, msg: EmailMessage) -> bool:
+    if not server.recipients:
+        logger.error("[%s] no recipients configured, email not sent", server.name)
+        return False
+    # Same email content, but with this server's sender and recipients
+    del msg["From"]
+    del msg["To"]
+    msg["From"] = server.sender
+    msg["To"] = ", ".join(server.recipients)
     try:
-        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=10) as smtp:
-            if config.SMTP_USE_TLS:
-                smtp.starttls()
-            if config.SMTP_USER:
-                smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
+        with smtplib.SMTP(server.host, server.port, timeout=10) as smtp:
+            if server.use_tls:
+                smtp.starttls()  # encrypt the connection (required by Gmail)
+            if server.user:
+                smtp.login(server.user, server.password)
             smtp.send_message(msg)
         return True
     except (smtplib.SMTPException, OSError) as exc:
-        logger.error("Could not send email %r: %s", msg["Subject"], exc)
+        logger.error("[%s] could not send email %r: %s", server.name, msg["Subject"], exc)
         return False
+
+
+def send_message(msg: EmailMessage) -> bool:
+    """
+    Send an email to every configured mail server.
+    Returns True if at least one delivered it; each failure is logged.
+    """
+    servers = configured_mail_servers()
+    if not servers:
+        logger.error("No mail server configured; email %r not sent", msg["Subject"])
+        return False
+    results = [_send_via(server, msg) for server in servers]
+    return any(results)
 
 
 def send_email(alert: Alert) -> bool:

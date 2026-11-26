@@ -56,3 +56,13 @@ HEALTH_MAX_DATA_AGE_SECONDS = int(os.getenv("HEALTH_MAX_DATA_AGE_SECONDS", "120"
 HEALTH_MAX_CONSUMER_LAG = int(os.getenv("HEALTH_MAX_CONSUMER_LAG", "500"))
 HEALTH_FAILURES_BEFORE_ALERT = int(os.getenv("HEALTH_FAILURES_BEFORE_ALERT", "2"))
 HEALTH_WATCH_ALERT_SERVICE = os.getenv("HEALTH_WATCH_ALERT_SERVICE", "true").lower() == "true"
+
+# --- Real email (optional): also send alerts to a real inbox, e.g. Gmail ---
+# Leave REAL_SMTP_HOST empty to only use Mailpit.
+REAL_SMTP_HOST = os.getenv("REAL_SMTP_HOST", "")
+REAL_SMTP_PORT = int(os.getenv("REAL_SMTP_PORT", "587"))
+REAL_SMTP_USE_TLS = os.getenv("REAL_SMTP_USE_TLS", "true").lower() == "true"
+REAL_SMTP_USER = os.getenv("REAL_SMTP_USER", "")
+REAL_SMTP_PASSWORD = os.getenv("REAL_SMTP_PASSWORD", "")
+REAL_ALERT_EMAIL_FROM = os.getenv("REAL_ALERT_EMAIL_FROM", "")   # defaults to REAL_SMTP_USER
+REAL_ALERT_EMAIL_TO = os.getenv("REAL_ALERT_EMAIL_TO", "")       # comma-separated for several people
