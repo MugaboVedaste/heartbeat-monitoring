@@ -4,7 +4,7 @@ __pycache__/
 venv/
 .venv/
 
-# Secrets (we'll use a .env file for passwords later)
+# Secrets (passwords live in .env; .env.example shows which settings exist)
 .env
 
 # Editors and OS files

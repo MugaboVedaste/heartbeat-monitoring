@@ -17,7 +17,7 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "heartbeats")
 
 # --- PostgreSQL ---
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
+POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5433"))  # docker-compose maps 5433 -> 5432
 POSTGRES_DB = os.getenv("POSTGRES_DB", "heartbeat_db")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")

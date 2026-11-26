@@ -16,8 +16,10 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 CREATE INDEX IF NOT EXISTS idx_heartbeats_recorded_at
     ON heartbeats (recorded_at);
 
--- Fast queries for one customer over time ("CUST-007's readings today")
-CREATE INDEX IF NOT EXISTS idx_heartbeats_customer_time
+-- Fast queries for one customer over time ("CUST-007's readings today").
+-- UNIQUE also makes writes idempotent: if Kafka re-delivers a reading after a crash,
+-- the consumer's INSERT ... ON CONFLICT DO NOTHING skips it instead of saving a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeats_customer_time
     ON heartbeats (customer_id, recorded_at);
 
 -- Fast lookup of anomalies ("all high readings this week")

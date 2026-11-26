@@ -38,10 +38,17 @@ SHUTDOWN_SAVE_ATTEMPTS = 3     # when stopping, don't retry forever
 # Other errors (e.g. a bug in our SQL) would fail every time, so they are not retried.
 RETRYABLE_DB_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
 
+# ON CONFLICT DO NOTHING: a reading Kafka delivers twice (e.g. after a crash) is skipped, not duplicated.
+# This relies on the unique index on (customer_id, recorded_at) from sql/schema.sql.
 INSERT_SQL = """
     INSERT INTO heartbeats (customer_id, recorded_at, heart_rate, status)
     VALUES %s
+    ON CONFLICT DO NOTHING
 """
+INSERT_ONE_SQL = INSERT_SQL.replace("VALUES %s", "VALUES (%s, %s, %s, %s)")
+
+# Errors caused by the DATA, not the connection: retrying the same rows would fail forever.
+REJECTED_ROW_ERRORS = (psycopg2.DataError, psycopg2.IntegrityError)
 
 
 class Database:
@@ -67,6 +74,25 @@ class Database:
         with self.conn:  # commits on success, rolls back on error
             with self.conn.cursor() as cur:
                 execute_values(cur, INSERT_SQL, values)
+
+    def save_each(self, rows: list[dict]) -> int:
+        """
+        Insert rows one at a time, skipping any the database rejects. Returns how many were rejected.
+
+        Used when a batch contains a row PostgreSQL refuses (a data error). Without this, that one
+        row would make the whole batch fail on every restart and block the pipeline.
+        """
+        rejected = 0
+        for r in rows:
+            try:
+                with self.conn:  # one transaction per row
+                    with self.conn.cursor() as cur:
+                        cur.execute(INSERT_ONE_SQL,
+                                    (r["customer_id"], r["recorded_at"], r["heart_rate"], r["status"]))
+            except REJECTED_ROW_ERRORS as exc:
+                rejected += 1
+                logger.error("Database rejected a reading and it was skipped (%s): %s", r, exc)
+        return rejected
 
     def close(self) -> None:
         if self.conn is not None:
@@ -94,13 +120,21 @@ def save_with_retry(db, rows: list[dict], wait: Callable[[float], None],
     if not rows:
         return
     attempt = 0
+    one_by_one = False
     while True:
         try:
             db.ensure_connected()
-            db.save(rows)
+            if one_by_one:
+                db.save_each(rows)  # rows saved before a connection drop are skipped by ON CONFLICT
+            else:
+                db.save(rows)
             if attempt:
                 logger.info("Database is back: saved the batch after %d failed attempt(s)", attempt)
             return
+        except REJECTED_ROW_ERRORS:
+            # The batch contains a row the database refuses. Save the good rows one by one
+            # and skip the bad ones, instead of failing (and replaying) the whole batch forever.
+            one_by_one = True
         except RETRYABLE_DB_ERRORS as exc:
             attempt += 1
             db.close()  # the old connection may be broken; reconnect on the next try

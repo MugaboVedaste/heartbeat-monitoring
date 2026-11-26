@@ -21,6 +21,9 @@ flowchart LR
     K --> A["Alert service<br/>(alert_service.py)"]
     A -->|"3 abnormal in a row"| M["Email<br/>(Mailpit: localhost:8025)"]
     A --> DB
+    H["Health monitor<br/>(health_monitor.py)"] -.->|"checks every 30 s"| K
+    H -.-> DB
+    H -->|"pipeline problem / resolved"| M
 ```
 
 📐 **Detailed data flow diagram:** [view image](docs/architecture.png) · [editable draw.io source](docs/architecture.drawio)
@@ -62,13 +65,15 @@ Each reading looks like this:
 
 ```
 heartbeat-monitoring/
-├── docker-compose.yml      # Kafka + Kafbat UI + PostgreSQL + Grafana
+├── docker-compose.yml      # Kafka + Kafbat UI + PostgreSQL + Grafana + Mailpit
 ├── .env.example            # settings template (copy to .env)
+├── .gitattributes          # keeps LF line endings on shell scripts that run in containers
 ├── requirements.txt
 ├── pytest.ini
 ├── sql/
 │   ├── schema.sql          # heartbeats table + indexes, applied automatically on first start
-│   └── 002_alerts.sql      # alerts table
+│   ├── 002_alerts.sql      # alerts table, applied automatically on first start
+│   └── 003_grafana_reader.sh   # creates Grafana's read-only user, automatically on first start
 ├── grafana/
 │   ├── provisioning/
 │   │   ├── datasources/
@@ -132,7 +137,7 @@ cp .env.example .env
 Open `.env` and set the passwords:
 
 - `POSTGRES_PASSWORD`: the main database password. Avoid the `$` character, or wrap the value in single quotes.
-- `GRAFANA_DB_PASSWORD`: password for Grafana's read-only database user (step 5). **Use letters and numbers only**; Grafana treats `$` as a variable.
+- `GRAFANA_DB_PASSWORD`: password for Grafana's read-only database user, created automatically in step 3. **Use letters and numbers only**; Grafana treats `$` as a variable.
 - `GRAFANA_ADMIN_PASSWORD`: your Grafana login.
 
 ### 3. Start the services
@@ -142,7 +147,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Wait until `kafka` and `postgres` show **healthy** and `grafana` and `kafka-ui` are **running** (about 30 seconds). On first start, PostgreSQL automatically creates the `heartbeats` table from `sql/schema.sql`.
+Wait until `kafka` and `postgres` show **healthy** and `grafana` and `kafka-ui` are **running** (about 30 seconds). On first start, PostgreSQL automatically creates the `heartbeats` and `alerts` tables and Grafana's read-only user from the files in `sql/`.
 
 ### 4. Create the Kafka topic
 
@@ -160,9 +165,11 @@ Check it:
 docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic heartbeats
 ```
 
-### 5. Create Grafana's read-only database user
+### 5. Grafana's read-only database user
 
-Grafana only needs to read data, so it gets its own user with `SELECT` access instead of the owner account:
+Grafana only needs to read data, so it gets its own user with `SELECT` access instead of the owner account. **On a fresh database this is created automatically in step 3** (by `sql/003_grafana_reader.sh`, using `GRAFANA_DB_USER` and `GRAFANA_DB_PASSWORD` from `.env`), so there is nothing to do here.
+
+Only if your database already existed before this script was added (init scripts run once, on first start), create the user by hand:
 
 ```bash
 docker exec -it postgres psql -U postgres -d heartbeat_db
@@ -172,8 +179,7 @@ docker exec -it postgres psql -U postgres -d heartbeat_db
 CREATE USER grafana_reader WITH PASSWORD 'your_grafana_db_password';  -- same as GRAFANA_DB_PASSWORD in .env
 GRANT CONNECT ON DATABASE heartbeat_db TO grafana_reader;
 GRANT USAGE ON SCHEMA public TO grafana_reader;
-GRANT SELECT ON heartbeats TO grafana_reader;
-GRANT SELECT ON alerts TO grafana_reader;
+GRANT SELECT ON heartbeats, alerts TO grafana_reader;
 \q
 ```
 
@@ -326,7 +332,7 @@ The **Customer Heart Beat Monitoring** dashboard opens automatically and refresh
 - **Latest anomalies** table
 - **Alerts** table: alerts raised by the alert service, colour-coded HIGH / LOW / RECOVERED
 
-Grafana connects to PostgreSQL automatically using the files in `grafana/provisioning/`, logging in as the read-only `grafana_reader` user from setup step 5. Inside Docker it reaches the database at `postgres:5432` (container name and internal port), not `localhost:5433`.
+Grafana connects to PostgreSQL automatically using the files in `grafana/provisioning/`, logging in as the read-only `grafana_reader` user (setup step 5). Inside Docker it reaches the database at `postgres:5432` (container name and internal port), not `localhost:5433`.
 
 The dashboard shows the last 15 minutes by default. When the pipeline is stopped, choose a wider range (top right, e.g. *Last 24 hours*) to see saved history.
 
@@ -403,11 +409,11 @@ docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 | `status` | VARCHAR(10) | `low`, `normal` or `high`; `CHECK` enforced |
 | `ingested_at` | TIMESTAMPTZ | When the pipeline saved it (default `NOW()`) |
 
-Indexes: `recorded_at` (time-range queries), `(customer_id, recorded_at)` (per-customer history), and a partial index on `(status, recorded_at)` for non-normal readings (fast anomaly queries).
+Indexes: `recorded_at` (time-range queries), a **unique** index on `(customer_id, recorded_at)` (per-customer history, and it stops the same reading being saved twice), and a partial index on `(status, recorded_at)` for non-normal readings (fast anomaly queries).
 
 ### Validation rules
 
-A message is **rejected** (logged and skipped) if it is not a JSON object, is missing `customer_id`, `timestamp` or `heart_rate`, has a non-numeric heart rate, a heart rate outside 20–250 bpm, an empty or over-long customer id, or an unparseable timestamp.
+A message is **rejected** (logged and skipped) if it is not a JSON object, is missing `customer_id`, `timestamp` or `heart_rate`, has a non-numeric or non-finite (`NaN`, `Infinity`) heart rate, a heart rate outside 20–250 bpm, an empty or over-long customer id, or an unparseable timestamp.
 
 Valid readings are **labelled**:
 
@@ -425,7 +431,9 @@ Thresholds live in `src/config.py`. Anomalies are stored (not discarded), since 
 - **Safe writes to Kafka:** the producer uses `acks=all` and idempotence, so retried sends never create duplicates.
 - **No data loss in the consumer:** auto-commit is off. The consumer saves a batch to PostgreSQL **first** and only then commits its Kafka offset. If it crashes in between, Kafka re-delivers the unsaved readings on restart.
 - **Database outages:** if PostgreSQL is unreachable, the consumer retries with exponential backoff (1s, 2s, 4s … up to 30s), reconnecting each time. While waiting it pauses Kafka consumption but keeps polling, so it stays in its consumer group. Readings wait safely in Kafka until the database returns.
+- **No duplicates:** the insert uses `ON CONFLICT DO NOTHING` on the unique `(customer_id, recorded_at)` index, so if Kafka re-delivers readings after a crash, the repeats are skipped instead of saved twice.
 - **Bad messages** are skipped individually and never stop the pipeline.
+- **Rows the database refuses:** if PostgreSQL rejects a row in a batch (a data or constraint error that retrying can't fix), the consumer saves the batch row by row, logs and skips the bad row, and keeps the rest, instead of failing and replaying the same batch forever.
 
 ---
 
@@ -440,7 +448,7 @@ Thresholds live in `src/config.py`. Anomalies are stored (not discarded), since 
 
 End-to-end tests use unique customer ids like `TEST-3fa9c1d2` and delete their rows afterwards, so they don't affect real data. They are skipped automatically if Kafka or PostgreSQL isn't running.
 
-Current result: **82 tests passing.**
+Current result: **90 tests** (86 unit + 4 end-to-end).
 
 ---
 
@@ -452,7 +460,7 @@ All settings are read from `.env` by `src/config.py`.
 |---|---|---|
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka address |
 | `KAFKA_TOPIC` | `heartbeats` | Topic name |
-| `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5433` | Database address (Docker maps 5433 → 5432) |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5433` | Database address (Docker maps 5433 → 5432); `.env.example` uses the same |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — | Database login |
 | `NUM_CUSTOMERS` | `10` | Simulated customers |
 | `SEND_INTERVAL_SECONDS` | `1.0` | Seconds between rounds of readings |
@@ -497,6 +505,16 @@ PostgreSQL creates its user from `.env` only on the very first start. Connect wi
 **Changes to `sql/schema.sql` don't apply**
 Same reason: the schema runs only on first start. Reset with `docker compose down -v`.
 
+**Upgrading an existing database to idempotent writes**
+Databases created before the unique index existed still work (the consumer's `ON CONFLICT DO NOTHING` is harmless without it), but won't block duplicates. To add the index without losing data, run this in psql (step 1 removes any existing duplicate readings, keeping the oldest):
+
+```sql
+DELETE FROM heartbeats a USING heartbeats b
+WHERE a.customer_id = b.customer_id AND a.recorded_at = b.recorded_at AND a.id > b.id;
+DROP INDEX IF EXISTS idx_heartbeats_customer_time;
+CREATE UNIQUE INDEX idx_heartbeats_customer_time ON heartbeats (customer_id, recorded_at);
+```
+
 **`ModuleNotFoundError: No module named ...`**
 The venv isn't active. Run `source venv/Scripts/activate` and check for `(venv)` in the prompt.
 
@@ -529,14 +547,13 @@ Kafka has no Docker volume in this setup, so its data is removed with the contai
 
 ## Limitations and future improvements
 
-- **At-least-once delivery:** if the consumer crashes after saving a batch but before committing the offset, those readings are saved twice on restart. A unique constraint on `(customer_id, recorded_at)` with `ON CONFLICT DO NOTHING` would make writes idempotent.
 - **Dead-letter topic:** invalid messages are only logged; sending them to a separate Kafka topic would let them be inspected or replayed.
 - **Single broker:** fine for development. Production would use 3+ brokers with replication factor 3.
 - **Who watches the watchdog?** If the health monitor itself stops, nobody is told. Production systems use an external service (e.g. a "dead man's switch" that alerts when a heartbeat ping stops arriving).
 - **Python services aren't containerised:** Docker restarts crashed containers, but the producer, consumer, alert service and health monitor must be restarted by hand. Running them in Docker too would give them the same automatic restarts.
 - **Alert state lives in memory:** if the alert service restarts, it forgets ongoing streaks and cooldowns.
 - **Kafka data is not persisted** across `docker compose down`.
-- **Grafana's database user is created by hand** (setup step 5). An init script could create it automatically on first start.
+- **Init scripts run only once.** Changes to `sql/` (such as the Grafana user script) apply to a fresh database only; existing databases need the manual steps in setup step 5 and Troubleshooting.
 
 ---
 

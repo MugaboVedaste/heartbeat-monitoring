@@ -32,6 +32,11 @@ class FakeDatabase:
             raise self.error
         self.saved.extend(rows)
 
+    def save_each(self, rows):
+        self.saved_one_by_one = list(rows)
+        self.saved.extend(rows)
+        return 0
+
     def close(self):
         self.close_calls += 1
 
@@ -94,6 +99,37 @@ def test_errors_that_retrying_cannot_fix_are_not_retried():
         save_with_retry(db, ROWS, wait)
 
     assert wait.delays == []            # failed straight away, no pointless retries
+
+
+def test_batch_with_a_rejected_row_falls_back_to_saving_one_by_one():
+    db = FakeDatabase(failures=1, error=psycopg2.DataError("value out of range"))
+    wait = FakeWait()
+
+    save_with_retry(db, ROWS, wait)
+
+    assert db.saved_one_by_one == ROWS  # switched to row-by-row instead of failing forever
+    assert wait.delays == []            # not a connection problem, so no waiting
+
+
+def test_connection_lost_during_row_by_row_fallback_is_still_retried():
+    class DropsDuringFallback(FakeDatabase):
+        def __init__(self):
+            super().__init__(failures=1, error=psycopg2.IntegrityError("check violation"))
+            self.fallback_calls = 0
+
+        def save_each(self, rows):
+            self.fallback_calls += 1
+            if self.fallback_calls == 1:
+                raise psycopg2.OperationalError("server closed the connection")
+            return super().save_each(rows)
+
+    db, wait = DropsDuringFallback(), FakeWait()
+
+    save_with_retry(db, ROWS, wait)
+
+    assert db.fallback_calls == 2       # retried the fallback after the connection dropped
+    assert db.saved == ROWS
+    assert wait.delays == [1]
 
 
 def test_empty_batch_does_not_touch_the_database():

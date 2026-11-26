@@ -88,6 +88,20 @@ def test_heart_rate_that_is_not_a_number_is_rejected(value):
         validate_reading(make_reading(heart_rate=value))
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_heart_rate_is_rejected(value):
+    with pytest.raises(InvalidReadingError, match="finite"):
+        validate_reading(make_reading(heart_rate=value))
+
+
+@pytest.mark.parametrize("token", [b"NaN", b"Infinity", b"-Infinity"])
+def test_nan_and_infinity_in_raw_json_are_rejected_not_crashed_on(token):
+    # Python's json.loads accepts these tokens, so they reach validation from real Kafka messages
+    raw = b'{"customer_id": "CUST-001", "timestamp": "2026-11-24T10:00:00Z", "heart_rate": ' + token + b"}"
+    with pytest.raises(InvalidReadingError):
+        validate_reading(parse_message(raw))
+
+
 @pytest.mark.parametrize("field", ["customer_id", "timestamp", "heart_rate"])
 def test_missing_field_is_rejected(field):
     reading = make_reading()

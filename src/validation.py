@@ -10,6 +10,7 @@ If both pass, it gets a status label: "low", "normal" or "high".
 """
 
 import json
+import math
 from datetime import datetime, timezone
 
 from src import config
@@ -75,6 +76,9 @@ def validate_reading(data: dict) -> dict:
     # bool is a subclass of int in Python, so exclude it explicitly
     if isinstance(heart_rate, bool) or not isinstance(heart_rate, (int, float)):
         raise InvalidReadingError(f"heart_rate must be a number, got {heart_rate!r}")
+    # Python's json module accepts NaN and Infinity, but they can't be rounded or stored
+    if isinstance(heart_rate, float) and not math.isfinite(heart_rate):
+        raise InvalidReadingError(f"heart_rate must be a finite number, got {heart_rate!r}")
     if isinstance(heart_rate, float) and not heart_rate.is_integer():
         heart_rate = round(heart_rate)
     heart_rate = int(heart_rate)
